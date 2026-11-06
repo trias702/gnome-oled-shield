@@ -5,7 +5,7 @@ BUILD_DIR = build
 DIST_DIR = dist
 VERSION := $(shell jq -r '.version' metadata.json)
 
-.PHONY: all clean install install-system uninstall package lint test test-unit test-gjs test-integration test-environment test-pixelshift test-setup install-dev uninstall-dev restart-shell watch help dev-setup validate-json build
+.PHONY: all clean install install-system uninstall package lint test test-unit test-gjs test-integration test-environment test-pixelshift test-setup install-dev uninstall-dev restart-shell test-headless probe-apis watch help dev-setup validate-json build
 
 all: package
 
@@ -138,6 +138,14 @@ test-unit:
 test-gjs:
 	@echo "Running GJS tests..."
 	@gjs -m tests/test-modernization.js
+
+# Run the extension inside an isolated headless GNOME Shell (see tests/headless/README.md)
+test-headless:
+	@bash tests/headless/run-headless-tests.sh
+
+# Check that every GNOME Shell/mutter API the extension uses exists on this system
+probe-apis:
+	@bash tests/headless/probe-shell-apis.sh
 
 test-integration:
 	@echo "Running integration tests..."
@@ -276,6 +284,8 @@ help:
 	@echo "  test             - Run all tests (GJS + integration)"
 	@echo "  test-unit        - Run unit tests with GJS"
 	@echo "  test-integration - Run integration tests"
+	@echo "  test-headless    - Run in-shell tests in an isolated headless GNOME Shell"
+	@echo "  probe-apis       - Check required GNOME Shell/mutter APIs on this system"
 	@echo "  test-environment - Run environment-specific tests"
 	@echo "  test-pixelshift  - Run pixel shift tests"
 	@echo "  test-setup       - Set up test environment"

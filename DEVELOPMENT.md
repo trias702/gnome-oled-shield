@@ -64,8 +64,16 @@ After installing or updating the extension, GNOME Shell must reload it. GNOME
 Shell 50 runs only as a Wayland compositor, so it cannot be restarted in place:
 log out and log back in.
 
-To test without logging out, run a separate headless or nested shell on a
-private D-Bus session (nested needs the mutter devkit package):
+To test without logging out, run the in-shell test suite. It starts an isolated
+headless GNOME Shell, loads the freshly built extension, and exercises every
+feature against real shell state (see `tests/headless/README.md`):
+
+```bash
+make test-headless   # ~2 min, exits non-zero on any failure or shell warning
+make probe-apis      # checks every GNOME Shell/mutter API the code relies on
+```
+
+For manual poking, a nested shell window also works (needs the mutter devkit package):
 
 ```bash
 dbus-run-session -- gnome-shell --devkit --wayland

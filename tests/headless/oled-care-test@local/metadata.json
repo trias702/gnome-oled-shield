@@ -1,0 +1,1 @@
+{"uuid": "oled-care-test@local", "name": "OLED Care in-shell tests", "description": "Test driver (isolated test env only)", "shell-version": ["50"]}
