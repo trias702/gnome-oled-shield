@@ -8,7 +8,7 @@
 set -e
 
 # Constants
-EXTENSION_UUID="oled-care@kimasplund.online"
+EXTENSION_UUID="oled-care@asplund.kim"
 EXTENSION_NAME="GNOME OLED Shield"
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 GNOME_SHELL_VERSION=$(gnome-shell --version | awk '{print $3}' | cut -d. -f1)
@@ -298,7 +298,7 @@ install_make() {
     local install_target="install"
     
     if [ "$INSTALL_TYPE" = "user" ]; then
-        install_target="install-user"
+        install_target="install"
     elif [ "$INSTALL_TYPE" = "system" ]; then
         install_target="install-system"
     fi
@@ -358,8 +358,8 @@ show_post_install_message() {
     echo -e "${BOLD}${GREEN}Installation completed successfully!${RESET}"
     echo ""
     
-    if [ "$GNOME_SHELL_VERSION" -lt 45 ]; then
-        log_warning "This extension is designed for GNOME Shell 45+. You are running GNOME Shell $GNOME_SHELL_VERSION."
+    if [ "$GNOME_SHELL_VERSION" -lt 50 ]; then
+        log_warning "This extension targets GNOME Shell 50+. You are running GNOME Shell $GNOME_SHELL_VERSION."
         echo -e "${YELLOW}Some features may not work correctly.${RESET}"
         echo ""
     fi
@@ -374,8 +374,7 @@ show_post_install_message() {
     
     echo ""
     echo -e "${BOLD}Restarting GNOME Shell:${RESET}"
-    echo "  On X11: Press Alt+F2, type 'r' and press Enter"
-    echo "  On Wayland: Log out and log back in"
+    echo "  GNOME Shell 50 is Wayland-only: log out and log back in"
     echo ""
 }
 

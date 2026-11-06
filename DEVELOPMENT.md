@@ -60,15 +60,15 @@ This uses `inotifywait` to monitor files and rebuilds when changes are detected.
 
 ### Restarting GNOME Shell
 
-After installing or updating the extension, you need to restart GNOME Shell:
+After installing or updating the extension, GNOME Shell must reload it. GNOME
+Shell 50 runs only as a Wayland compositor, so it cannot be restarted in place:
+log out and log back in.
 
-- On X11: `Alt+F2`, type `r`, press Enter
-- On Wayland: Log out and log back in
-
-Or use the provided command (X11 only):
+To test without logging out, run a separate headless or nested shell on a
+private D-Bus session (nested needs the mutter devkit package):
 
 ```bash
-make restart-shell
+dbus-run-session -- gnome-shell --devkit --wayland
 ```
 
 ## Debugging

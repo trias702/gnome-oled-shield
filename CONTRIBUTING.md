@@ -19,8 +19,8 @@ Please be respectful and considerate of others when participating in this projec
 ## Development Environment
 
 Ensure you have the following installed:
-- GNOME Shell 45+
-- GJS 1.74+
+- GNOME Shell 50+
+- GJS 1.86+
 - Git
 - A code editor with JavaScript support
 

@@ -52,12 +52,15 @@ build: validate-json
 package: build $(DIST_DIR)
 	@echo "Creating package..."
 	@cd $(BUILD_DIR) && \
+	rm -f ../$(DIST_DIR)/$(UUID)-v$(VERSION).zip && \
 	zip -r ../$(DIST_DIR)/$(UUID)-v$(VERSION).zip \
 		extension.js \
 		prefs.js \
 		metadata.json \
+		stylesheet.css \
 		schemas/ \
 		lib/ \
+		icons/ \
 		README.md \
 		$(if $(wildcard LICENSE),LICENSE,)
 
@@ -67,7 +70,9 @@ install: build
 	@rm -rf $(EXTENSIONS_PATH)/$(UUID)
 	@mkdir -p $(EXTENSIONS_PATH)/$(UUID)
 	@cp -r $(BUILD_DIR)/* $(EXTENSIONS_PATH)/$(UUID)/
-	@echo "Extension installed. Please restart GNOME Shell (Alt+F2, r, Enter on X11 or re-login on Wayland)"
+	@echo "Extension installed to $(EXTENSIONS_PATH)/$(UUID)"
+	@echo "GNOME Shell 50 is Wayland-only: log out and back in so the shell loads the new code,"
+	@echo "then enable it with: gnome-extensions enable $(UUID)"
 
 # Install the extension for development
 install-dev: build
@@ -85,7 +90,7 @@ install-dev: build
 		glib-compile-schemas $(HOME)/.local/share/glib-2.0/schemas/; \
 	fi
 	@chmod -R +r $(EXTENSIONS_PATH)/$(DEV_UUID)
-	@echo "Development version installed. Please restart GNOME Shell (Alt+F2, r, Enter on X11 or re-login on Wayland)"
+	@echo "Development version installed. Log out and back in to load it (GNOME 50 is Wayland-only)."
 
 # System-wide installation
 install-system: build
@@ -252,14 +257,9 @@ watch:
 		make install-dev; \
 	done
 
-# Restart GNOME Shell (X11 only)
+# GNOME Shell 50 has no X11 session, so the shell cannot be restarted in place
 restart-shell:
-	@if [ "$$XDG_SESSION_TYPE" = "x11" ]; then \
-		echo "Restarting GNOME Shell..."; \
-		dbus-send --session --type=method_call --dest=org.gnome.Shell /org/gnome/Shell org.gnome.Shell.Eval string:'global.reexec_self()'; \
-	else \
-		echo "Please log out and back in to restart GNOME Shell on Wayland"; \
-	fi
+	@echo "GNOME Shell 50 runs on Wayland only: log out and back in to reload extensions."
 
 # Show help
 help:
@@ -281,7 +281,7 @@ help:
 	@echo "  test-setup       - Set up test environment"
 	@echo "  clean            - Remove build artifacts"
 	@echo "  dev-setup        - Set up development environment"
-	@echo "  restart-shell    - Restart GNOME Shell (X11 only)"
+	@echo "  restart-shell    - Explain how to reload the shell on GNOME 50 (Wayland)"
 	@echo "  watch            - Watch for changes and rebuild"
 	@echo "  validate-json    - Validate JSON and XML schema files"
 	@echo "  help             - Show this help message" 

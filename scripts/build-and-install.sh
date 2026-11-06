@@ -319,7 +319,6 @@ verify_installation
 # Provide information on restarting the shell
 echo
 log_info "To apply changes, restart GNOME Shell:"
-echo "  • On X11: Press Alt+F2, type 'r' and press Enter"
 echo "  • On Wayland: Log out and log back in"
 echo
 

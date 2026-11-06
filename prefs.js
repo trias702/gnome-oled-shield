@@ -15,9 +15,9 @@ import {ExtensionPreferences} from 'resource:///org/gnome/Shell/Extensions/js/ex
  */
 function _log(message, settings = null) {
     // Use nullish coalescing for safer default values
-    const debugMode = settings?.get_boolean('debug-mode') ?? true;
+    const debugMode = settings?.get_boolean('debug-mode') ?? false;
     if (debugMode) {
-        log(`[OLED Care Prefs] ${message}`);
+        console.log(`[OLED Care Prefs] ${message}`);
     }
 }
 
@@ -29,14 +29,13 @@ function _log(message, settings = null) {
  */
 function _logError(error, context = '', settings = null) {
     // Use nullish coalescing and optional chaining for safer access
-    const debugMode = settings?.get_boolean('debug-mode') ?? true;
-    if (debugMode) {
-        const contextStr = context ? ` (${context})` : '';
-        const message = error?.message ?? 'Unknown error';
-        log(`[OLED Care Prefs] ERROR${contextStr}: ${message}`);
-        // Use optional chaining and logical AND for conditional logging
-        error?.stack && log(`[OLED Care Prefs] Stack trace:\n${error.stack}`);
-    }
+    // Errors are always logged; the stack trace only in debug mode
+    const debugMode = settings?.get_boolean('debug-mode') ?? false;
+    const contextStr = context ? ` (${context})` : '';
+    const message = error?.message ?? 'Unknown error';
+    console.error(`[OLED Care Prefs] ERROR${contextStr}: ${message}`);
+    if (debugMode && error?.stack)
+        console.error(`[OLED Care Prefs] Stack trace:\n${error.stack}`);
 }
 
 export default class OledCarePreferences extends ExtensionPreferences {
@@ -104,6 +103,14 @@ export default class OledCarePreferences extends ExtensionPreferences {
             // Create a preferences page
             const page = new Adw.PreferencesPage();
             window.add(page);
+
+            // GNOME never calls ExtensionPreferences.destroy(), so disconnect
+            // our GSettings handlers when this window closes. Otherwise they
+            // keep firing into destroyed widgets after the window is gone.
+            window.connect('close-request', () => {
+                this.destroy();
+                return false;
+            });
             
             // Validate required settings
             if (!this.#validateSettings()) {
@@ -651,12 +658,11 @@ export default class OledCarePreferences extends ExtensionPreferences {
                 'changed::pixel-refresh-time-remaining'
             );
 
-            this.#trackSignal(
-                this.#settings,
-                this.#settings.connect('changed::pixel-refresh-next-run', () => {
-                    const nextRun = this.#settings.get_string('pixel-refresh-next-run');
-                    if (nextRun) {
-                        const date = new Date(nextRun);
+            const settings = this.#settings;
+            const syncNextRun = () => {
+                    const nextRun = settings.get_string('pixel-refresh-next-run');
+                    const date = nextRun ? new Date(nextRun) : null;
+                    if (date && !Number.isNaN(date.getTime())) {
                         const timeString = date.toLocaleTimeString(undefined, {
                             hour: '2-digit',
                             minute: '2-digit'
@@ -665,9 +671,19 @@ export default class OledCarePreferences extends ExtensionPreferences {
                     } else {
                         nextRunLabel.set_text('Next run: Not scheduled');
                     }
-                }),
+            };
+            this.#trackSignal(
+                settings,
+                settings.connect('changed::pixel-refresh-next-run', syncNextRun),
                 'changed::pixel-refresh-next-run'
             );
+
+            // Show the current state immediately instead of waiting for a change
+            syncNextRun();
+            const running = settings.get_boolean('pixel-refresh-running');
+            statusLabel.set_text(running ? 'Running' : 'Idle');
+            progressBar.set_visible(running);
+            progressBar.set_fraction(settings.get_int('pixel-refresh-progress') / 100.0);
             
         } catch (error) {
             _logError(error, 'buildStatusIndicator', this.#settings);
@@ -842,19 +858,17 @@ export default class OledCarePreferences extends ExtensionPreferences {
     destroy() {
         // Disconnect all tracked signals
         for (const signal of this.#signalIds ?? []) {
-            // Use optional chaining to safely access properties
-            signal?.object?.disconnect?.(signal.id);
+            try {
+                signal?.object?.disconnect?.(signal.id);
+            } catch {
+                // Widget already finalized
+            }
         }
-        
+
         // Clear arrays
         this.#signalIds = [];
-        
+
         // Clear references
         this.#settings = null;
-        
-        // Call parent method if it exists
-        if (super.destroy) {
-            super.destroy();
-        }
     }
 } 

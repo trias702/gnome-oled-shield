@@ -18,9 +18,14 @@ const Main = isTestEnv
     : (await import('resource:///org/gnome/shell/ui/main.js'));
 
 import { Extension as BaseExtension } from 'resource:///org/gnome/shell/extensions/extension.js';
+// PressureBarrier lives in the shell's JS layout module (there is no Shell.PressureBarrier)
+import { PressureBarrier } from 'resource:///org/gnome/shell/ui/layout.js';
 
 // Import compatibility layer first to register polyfills (AbortController, etc.)
-import './lib/compatibility.js';
+import { removeSource } from './lib/compatibility.js';
+
+// Unfocused-window dimming effect name, used to find our effect on window actors
+const UNFOCUS_DIM_EFFECT_NAME = 'oled-care-unfocus-dim';
 
 // Import feature modules
 import Dimming from './lib/dimming.js';
@@ -123,8 +128,11 @@ export default class OledCareExtension extends BaseExtension {
     #panelHideTimeoutId;
     #panelShowTimeoutId;
     #unfocusDimEnabled;
-    #unfocusDimEffects;
     #focusWindowId;
+    #windowCreatedId;
+    #panelSignalIds;
+    #dockBackup;
+    #enableGeneration;
 
     /**
      * Constructor for the extension
@@ -161,11 +169,11 @@ export default class OledCareExtension extends BaseExtension {
         this.#panelHideTimeoutId = null;
         this.#panelShowTimeoutId = null;
         this.#unfocusDimEnabled = false;
-        this.#unfocusDimEffects = new Map();
         this.#focusWindowId = null;
-
-        // Initialize error handling
-        this.#initializeErrorReporting();
+        this.#windowCreatedId = null;
+        this.#panelSignalIds = [];
+        this.#dockBackup = null;
+        this.#enableGeneration = 0;
     }
     
     /**
@@ -194,7 +202,16 @@ export default class OledCareExtension extends BaseExtension {
         // Start a performance timer for the enable operation
         const enableTimer = metrics.startTimer('extension_enable');
         
+        // Each enable() gets a generation number so that async initialization
+        // which completes after disable() (or after a later enable()) is ignored.
+        const generation = ++this.#enableGeneration;
+        const isCurrent = () => generation === this.#enableGeneration && this.#settings !== null;
+
         try {
+            this.#abortController = new AbortController();
+            this.#status = OledCareExtension.STATUS.INITIALIZING;
+            this.#initializeErrorReporting();
+
             // Initialize settings
             this.#settings = this.getSettings();
 
@@ -227,6 +244,10 @@ export default class OledCareExtension extends BaseExtension {
             
             // Initialize components asynchronously
             this.#initializeComponentsAsync().then(() => {
+                if (!isCurrent()) {
+                    this.#log('Initialization finished after disable; ignoring');
+                    return;
+                }
                 this.#status = OledCareExtension.STATUS.READY;
                 this.#componentsReady = true;
 
@@ -259,6 +280,8 @@ export default class OledCareExtension extends BaseExtension {
 
                 this.#log('OLED Care extension fully initialized');
             }).catch(error => {
+                if (!isCurrent())
+                    return;
                 this.#status = OledCareExtension.STATUS.ERROR;
                 this.#logError('Async initialization error', error);
 
@@ -317,7 +340,8 @@ export default class OledCareExtension extends BaseExtension {
             // Create a timeout promise using AbortController
             const timeoutController = new AbortController();
             const timeoutPromise = new Promise((_, reject) => {
-                const timeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, OledCareExtension.INIT_TIMEOUT, () => {
+                let timeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, OledCareExtension.INIT_TIMEOUT, () => {
+                    timeoutId = null;
                     reject(new ComponentInitError('All Components', {
                         cause: new Error('Component initialization timeout'),
                         context: 'initialization',
@@ -325,19 +349,15 @@ export default class OledCareExtension extends BaseExtension {
                     }));
                     return GLib.SOURCE_REMOVE;
                 });
-                
-                // Track the timeout for cleanup
-                this.#resourceBundle.track(
-                    { id: timeoutId },
-                    () => GLib.source_remove(timeoutId),
-                    ResourceManager.RESOURCE_TYPES.TIMEOUT,
-                    { name: 'init-timeout' }
-                );
-                
-                // Clean up the timeout when abort is triggered
-                timeoutController.signal.addEventListener('abort', () => {
-                    GLib.source_remove(timeoutId);
-                });
+
+                // Remove the timeout when initialization finishes or the
+                // extension is disabled, whichever comes first
+                const cancel = () => {
+                    removeSource(timeoutId);
+                    timeoutId = null;
+                };
+                timeoutController.signal.addEventListener('abort', cancel);
+                this.#abortController.signal.addEventListener('abort', cancel);
             });
             
             // Wait for all components to initialize or timeout
@@ -541,8 +561,14 @@ export default class OledCareExtension extends BaseExtension {
                 pixelRefresh: this.#pixelRefresh,
                 dimming: this.#dimming,
                 openPreferences: () => {
-                    this.openPreferences().catch(e =>
-                        this.#logError('Error opening preferences', e));
+                    // Extension.openPreferences() returns nothing on GNOME 50;
+                    // wrap defensively in case a future version returns a Promise.
+                    try {
+                        const result = this.openPreferences();
+                        result?.catch?.(e => this.#logError('Error opening preferences', e));
+                    } catch (e) {
+                        this.#logError('Error opening preferences', e);
+                    }
                 },
                 extensionDir: this.dir
             });
@@ -851,13 +877,24 @@ export default class OledCareExtension extends BaseExtension {
             // Set up a pressure barrier at the top edge so mouse hover reveals the panel
             this.#setupPanelBarrier();
 
-            // Connect to panel enter/leave for auto-show/hide
-            panel.connect('enter-event', () => {
-                this.#cancelPanelHideTimeout();
-            });
-            panel.connect('leave-event', () => {
-                this.#schedulePanelHide();
-            });
+            // Connect to panel enter/leave for auto-show/hide. IDs are kept so
+            // they can be disconnected; otherwise every toggle stacks handlers.
+            this.#disconnectPanelSignals();
+            this.#panelSignalIds.push(
+                [panel, panel.connect('enter-event', () => {
+                    this.#cancelPanelHideTimeout();
+                    return Clutter.EVENT_PROPAGATE;
+                })],
+                [panel, panel.connect('leave-event', () => {
+                    this.#schedulePanelHide();
+                    return Clutter.EVENT_PROPAGATE;
+                })],
+                // The barrier is tied to the primary monitor geometry
+                [Main.layoutManager, Main.layoutManager.connect('monitors-changed', () => {
+                    if (this.#panelHidden)
+                        this.#setupPanelBarrier();
+                })]
+            );
 
             // Initially hide
             this.#panelSlideOut();
@@ -877,19 +914,18 @@ export default class OledCareExtension extends BaseExtension {
             this.#cancelPanelHideTimeout();
             this.#cancelPanelShowTimeout();
             this.#destroyPanelBarrier();
+            this.#disconnectPanelSignals();
 
             const panel = Main.panel;
             if (panel) {
-                panel.ease({
-                    y: 0,
-                    duration: 200,
-                    mode: Clutter.AnimationMode.EASE_OUT_QUAD,
-                });
+                panel.remove_all_transitions();
+                panel.translation_y = 0;
                 panel.reactive = true;
             }
 
-            // Restore struts so windows don't overlap the panel
-            Main.layoutManager.panelBox.set_height(this.#savedPanelHeight > 0 ? this.#savedPanelHeight : -1);
+            // Restore the panel box to its natural height so struts are correct again
+            Main.layoutManager.panelBox.set_height(-1);
+            this.#savedPanelHeight = -1;
 
             this.#panelHidden = false;
             this.#log('Top panel shown');
@@ -908,14 +944,20 @@ export default class OledCareExtension extends BaseExtension {
 
         const panelHeight = this.#savedPanelHeight > 0 ? this.#savedPanelHeight : panel.height;
 
+        // The panel is a child of the St.BoxLayout panelBox, which overrides its
+        // `y`, so animate translation_y instead (applied after layout).
+        panel.remove_all_transitions();
         panel.ease({
-            y: -panelHeight,
+            translation_y: -panelHeight,
             duration: 200,
             mode: Clutter.AnimationMode.EASE_IN_QUAD,
+            onComplete: () => {
+                // Collapse the panel box so windows use the full screen,
+                // unless auto-hide was turned off or the panel re-revealed meanwhile
+                if (this.#panelHidden && panel.translation_y < 0)
+                    Main.layoutManager.panelBox.set_height(0);
+            },
         });
-
-        // Collapse the panel box so windows use the full screen
-        Main.layoutManager.panelBox.set_height(0);
     }
 
     /**
@@ -929,8 +971,9 @@ export default class OledCareExtension extends BaseExtension {
         const panelHeight = this.#savedPanelHeight > 0 ? this.#savedPanelHeight : panel.height;
         Main.layoutManager.panelBox.set_height(panelHeight);
 
+        panel.remove_all_transitions();
         panel.ease({
-            y: 0,
+            translation_y: 0,
             duration: 200,
             mode: Clutter.AnimationMode.EASE_OUT_QUAD,
         });
@@ -947,8 +990,9 @@ export default class OledCareExtension extends BaseExtension {
         const monitor = Main.layoutManager.primaryMonitor;
         if (!monitor) return;
 
+        // GNOME 47+ barriers are created against the backend, not the display
         this.#panelBarrier = new Meta.Barrier({
-            display: global.display,
+            backend: global.backend,
             x1: monitor.x,
             y1: monitor.y,
             x2: monitor.x + monitor.width,
@@ -956,8 +1000,8 @@ export default class OledCareExtension extends BaseExtension {
             directions: Meta.BarrierDirection.POSITIVE_Y,
         });
 
-        // Use Shell.PressureBarrier for hot-edge detection
-        this.#panelPressure = new Shell.PressureBarrier(
+        // Use the shell's PressureBarrier helper for hot-edge detection
+        this.#panelPressure = new PressureBarrier(
             100,    // threshold (pressure units)
             1000,   // timeout (ms)
             Shell.ActionMode.NORMAL | Shell.ActionMode.OVERVIEW
@@ -981,6 +1025,7 @@ export default class OledCareExtension extends BaseExtension {
             if (this.#panelBarrier) {
                 this.#panelPressure.removeBarrier(this.#panelBarrier);
             }
+            this.#panelPressure.destroy?.();
             this.#panelPressure = null;
         }
         if (this.#panelBarrier) {
@@ -1000,10 +1045,11 @@ export default class OledCareExtension extends BaseExtension {
         this.#panelHideTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 1500, () => {
             this.#panelHideTimeoutId = null;
 
-            // Only hide if cursor isn't on the panel
+            // Only hide if cursor isn't on the panel (panel sits on the primary monitor)
             const [, pointerY] = global.get_pointer();
             const panelHeight = this.#savedPanelHeight > 0 ? this.#savedPanelHeight : Main.panel.height;
-            if (pointerY > panelHeight) {
+            const panelTop = Main.layoutManager.primaryMonitor?.y ?? 0;
+            if (pointerY > panelTop + panelHeight) {
                 this.#panelSlideOut();
             } else {
                 // Cursor still on panel, reschedule
@@ -1015,17 +1061,28 @@ export default class OledCareExtension extends BaseExtension {
     }
 
     #cancelPanelHideTimeout() {
-        if (this.#panelHideTimeoutId !== null) {
-            GLib.source_remove(this.#panelHideTimeoutId);
-            this.#panelHideTimeoutId = null;
-        }
+        removeSource(this.#panelHideTimeoutId);
+        this.#panelHideTimeoutId = null;
     }
 
     #cancelPanelShowTimeout() {
-        if (this.#panelShowTimeoutId !== null) {
-            GLib.source_remove(this.#panelShowTimeoutId);
-            this.#panelShowTimeoutId = null;
+        removeSource(this.#panelShowTimeoutId);
+        this.#panelShowTimeoutId = null;
+    }
+
+    /**
+     * Disconnect panel/layout signals used by auto-hide
+     * @private
+     */
+    #disconnectPanelSignals() {
+        for (const [obj, id] of this.#panelSignalIds) {
+            try {
+                obj.disconnect(id);
+            } catch {
+                // Object already gone
+            }
         }
+        this.#panelSignalIds = [];
     }
 
     /**
@@ -1041,12 +1098,19 @@ export default class OledCareExtension extends BaseExtension {
                 dash.hide();
             }
 
-            // Also handle Ubuntu Dock / Dash to Dock if present
+            // Also handle Ubuntu Dock / Dash to Dock if present. Remember the
+            // user's own values so they are restored (not reset) afterwards.
             const dockSettings = this.#getDockSettings();
             if (dockSettings) {
+                this.#dockBackup ??= {
+                    'dock-fixed': dockSettings.get_value('dock-fixed'),
+                    'autohide': dockSettings.get_value('autohide'),
+                    'intellihide-mode': dockSettings.get_value('intellihide-mode'),
+                };
                 dockSettings.set_boolean('dock-fixed', false);
                 dockSettings.set_boolean('autohide', true);
-                dockSettings.set_int('intellihide-mode', 0); // ALL_WINDOWS - most aggressive hide
+                // intellihide-mode is an enum key; ALL_WINDOWS is the most aggressive hide
+                dockSettings.set_string('intellihide-mode', 'ALL_WINDOWS');
             }
 
             this.#dashHidden = true;
@@ -1068,13 +1132,13 @@ export default class OledCareExtension extends BaseExtension {
                 dash.show();
             }
 
-            // Restore Ubuntu Dock / Dash to Dock defaults
+            // Restore the user's previous Ubuntu Dock / Dash to Dock values
             const dockSettings = this.#getDockSettings();
-            if (dockSettings) {
-                dockSettings.reset('dock-fixed');
-                dockSettings.reset('autohide');
-                dockSettings.reset('intellihide-mode');
+            if (dockSettings && this.#dockBackup) {
+                for (const [key, value] of Object.entries(this.#dockBackup))
+                    dockSettings.set_value(key, value);
             }
+            this.#dockBackup = null;
 
             this.#dashHidden = false;
             this.#log('Dash shown');
@@ -1090,10 +1154,10 @@ export default class OledCareExtension extends BaseExtension {
      */
     #getDockSettings() {
         try {
-            const schemas = Gio.Settings.list_schemas();
-            if (schemas.includes('org.gnome.shell.extensions.dash-to-dock')) {
-                return new Gio.Settings({ schema: 'org.gnome.shell.extensions.dash-to-dock' });
-            }
+            const schemaId = 'org.gnome.shell.extensions.dash-to-dock';
+            const schema = Gio.SettingsSchemaSource.get_default()?.lookup(schemaId, true);
+            if (schema)
+                return new Gio.Settings({ settings_schema: schema });
         } catch {
             // No dock extension installed
         }
@@ -1110,9 +1174,19 @@ export default class OledCareExtension extends BaseExtension {
             this.#unfocusDimEnabled = true;
 
             // Connect to focus-window changes
-            const display = global.display;
-            this.#focusWindowId = display.connect('notify::focus-window', () => {
+            this.#focusWindowId = global.display.connect('notify::focus-window', () => {
                 this.#onFocusWindowChanged();
+            });
+
+            // A new window can map without taking focus (Wayland focus-stealing
+            // prevention), in which case focus-window never changes. Re-evaluate
+            // whenever a window is mapped so it gets dimmed too.
+            this.#windowCreatedId = global.window_manager.connect('map', () => {
+                // Defer until the shell has finished its own map handling
+                global.compositor.get_laters().add(Meta.LaterType.BEFORE_REDRAW, () => {
+                    this.#onFocusWindowChanged();
+                    return GLib.SOURCE_REMOVE;
+                });
             });
 
             // Apply to current windows
@@ -1130,21 +1204,21 @@ export default class OledCareExtension extends BaseExtension {
     #disableUnfocusDim() {
         if (!this.#unfocusDimEnabled) return;
         try {
-            // Disconnect focus signal
             if (this.#focusWindowId !== null) {
                 global.display.disconnect(this.#focusWindowId);
                 this.#focusWindowId = null;
             }
-
-            // Remove all dimming effects
-            for (const [actor, effect] of this.#unfocusDimEffects) {
-                try {
-                    actor.remove_effect(effect);
-                } catch {
-                    // Actor may have been destroyed
-                }
+            if (this.#windowCreatedId !== null) {
+                global.window_manager.disconnect(this.#windowCreatedId);
+                this.#windowCreatedId = null;
             }
-            this.#unfocusDimEffects.clear();
+
+            // Remove our named effect from every window actor that has it
+            for (const actor of global.get_window_actors()) {
+                const effect = actor.get_effect(UNFOCUS_DIM_EFFECT_NAME);
+                if (effect)
+                    actor.remove_effect(effect);
+            }
 
             this.#unfocusDimEnabled = false;
             this.#log('Unfocus dim disabled');
@@ -1154,47 +1228,45 @@ export default class OledCareExtension extends BaseExtension {
     }
 
     /**
-     * Handle focus window change - dim unfocused, undim focused
+     * Current unfocused-window brightness offset (-0.4 .. 0.0)
+     * @returns {number}
+     * @private
+     */
+    #unfocusBrightness() {
+        const dimLevel = this.#settings?.get_int('unfocus-dim-level') ?? 15;
+        return -(dimLevel / 100);
+    }
+
+    /**
+     * Handle focus window change - dim unfocused, undim focused.
+     * Effects are looked up by name on the actors themselves, so closed
+     * windows never leave stale references behind.
      * @private
      */
     #onFocusWindowChanged() {
         if (!this.#unfocusDimEnabled) return;
 
         const focusWindow = global.display.focus_window;
-        const dimLevel = this.#settings?.get_int('unfocus-dim-level') ?? 15;
-        // Convert percentage (0-40) to brightness value (-1.0 to 0.0)
-        const brightness = -(dimLevel / 100);
+        const brightness = this.#unfocusBrightness();
 
-        // Get all window actors
-        const windowActors = global.get_window_actors();
-
-        for (const actor of windowActors) {
+        for (const actor of global.get_window_actors()) {
             const metaWindow = actor.get_meta_window();
             if (!metaWindow) continue;
 
-            // Skip non-normal windows (like docks, panels, etc.)
-            const windowType = metaWindow.get_window_type();
-            if (windowType !== 0) continue; // 0 = META_WINDOW_NORMAL
+            // Only dim normal application windows (not docks, panels, dialogs of the shell)
+            if (metaWindow.get_window_type() !== Meta.WindowType.NORMAL) continue;
 
-            const isFocused = metaWindow === focusWindow;
-            const existingEffect = this.#unfocusDimEffects.get(actor);
+            const existingEffect = actor.get_effect(UNFOCUS_DIM_EFFECT_NAME);
 
-            if (isFocused) {
-                // Remove dim effect from focused window
-                if (existingEffect) {
+            if (metaWindow === focusWindow) {
+                if (existingEffect)
                     actor.remove_effect(existingEffect);
-                    this.#unfocusDimEffects.delete(actor);
-                }
+            } else if (existingEffect) {
+                existingEffect.set_brightness_full(brightness, brightness, brightness);
             } else {
-                // Apply or update dim effect on unfocused window
-                if (existingEffect) {
-                    existingEffect.set_brightness_full(brightness, brightness, brightness);
-                } else {
-                    const effect = new Clutter.BrightnessContrastEffect();
-                    effect.set_brightness_full(brightness, brightness, brightness);
-                    actor.add_effect(effect);
-                    this.#unfocusDimEffects.set(actor, effect);
-                }
+                const effect = new Clutter.BrightnessContrastEffect();
+                effect.set_brightness_full(brightness, brightness, brightness);
+                actor.add_effect_with_name(UNFOCUS_DIM_EFFECT_NAME, effect);
             }
         }
     }
@@ -1204,11 +1276,10 @@ export default class OledCareExtension extends BaseExtension {
      * @private
      */
     #updateUnfocusDimLevel() {
-        const dimLevel = this.#settings?.get_int('unfocus-dim-level') ?? 15;
-        const brightness = -(dimLevel / 100);
-
-        for (const [, effect] of this.#unfocusDimEffects) {
-            effect.set_brightness_full(brightness, brightness, brightness);
+        const brightness = this.#unfocusBrightness();
+        for (const actor of global.get_window_actors()) {
+            actor.get_effect(UNFOCUS_DIM_EFFECT_NAME)
+                ?.set_brightness_full(brightness, brightness, brightness);
         }
     }
 
@@ -1222,6 +1293,9 @@ export default class OledCareExtension extends BaseExtension {
             
             this.#log('Disabling OLED Care extension');
             this.#status = OledCareExtension.STATUS.DISABLED;
+
+            // Invalidate any in-flight async initialization from enable()
+            this.#enableGeneration++;
 
             // Restore background if true black was active
             if (this.#settings?.get_boolean('true-black-background')) {

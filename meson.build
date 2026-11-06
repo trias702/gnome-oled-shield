@@ -47,6 +47,10 @@ install_data(core_files,
 install_data(lib_files,
     install_dir: join_paths(get_option('datadir'), 'gnome-shell/extensions', uuid, 'lib'))
 
+# Install icons
+install_subdir('icons',
+    install_dir: join_paths(get_option('datadir'), 'gnome-shell/extensions', uuid))
+
 # Install schemas
 schemas_dir = join_paths(get_option('datadir'), 'glib-2.0/schemas')
 install_data('schemas/org.gnome.shell.extensions.oled-care.gschema.xml',

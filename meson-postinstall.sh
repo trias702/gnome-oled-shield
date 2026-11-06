@@ -16,18 +16,8 @@ else
     echo "Warning: GSettings schema directory not found."
 fi
 
-# Restart GNOME Shell if running in X11
-if [ "$XDG_SESSION_TYPE" = "x11" ]; then
-    echo "Attempting to restart GNOME Shell..."
-    dbus-send --session --type=method_call \
-        --dest=org.gnome.Shell /org/gnome/Shell \
-        org.gnome.Shell.Eval string:'global.reexec_self();' &>/dev/null || {
-        echo "Warning: Could not restart GNOME Shell automatically."
-    }
-    echo "✓ Signal sent to restart GNOME Shell."
-else
-    echo "Running in Wayland session. You need to log out and log back in to activate the extension."
-fi
+# GNOME Shell 50 is Wayland-only and cannot be restarted in place
+echo "Log out and log back in so GNOME Shell loads the extension."
 
 # Additional post-install checks
 extension_path="${MESON_INSTALL_PREFIX}/share/gnome-shell/extensions/oled-care@asplund.kim"
@@ -42,6 +32,4 @@ echo "Installation complete!"
 echo "To enable the extension, use GNOME Extensions app or the command line:"
 echo "$ gnome-extensions enable oled-care@asplund.kim"
 echo ""
-echo "If the extension is not immediately available:"
-echo "- On X11: Press Alt+F2, type 'r', and press Enter to restart GNOME Shell"
-echo "- On Wayland: Log out and log back in to activate the extension" 
+echo "If the extension is not immediately available, log out and log back in." 

@@ -55,8 +55,8 @@ The codebase follows a modular architecture with these key components:
 
 ### Prerequisites
 
-- GNOME Shell 45+
-- GJS 1.74+
+- GNOME Shell 50+
+- GJS 1.86+
 
 ### Building and Testing
 
@@ -93,16 +93,14 @@ Visit [extensions.gnome.org](https://extensions.gnome.org) and search for "OLED 
 # Clone the repository
 git clone https://github.com/kimasplund/gnome-oled-shield.git
 
-# Create extension directory
-mkdir -p ~/.local/share/gnome-shell/extensions/oled-care@kimasplund.online
+# Build (compiles the GSettings schema) and install to
+# ~/.local/share/gnome-shell/extensions/oled-care@asplund.kim
+cd gnome-oled-shield
+make install
 
-# Copy extension files
-cp -r gnome-oled-shield/* ~/.local/share/gnome-shell/extensions/oled-care@kimasplund.online/
-
-# Restart GNOME Shell (X11)
-Alt+F2, r, Enter
-
-# For Wayland, log out and log back in
+# GNOME Shell 50 is Wayland-only: log out and log back in so the shell
+# picks up the new extension, then enable it
+gnome-extensions enable oled-care@asplund.kim
 ```
 
 ## Usage
