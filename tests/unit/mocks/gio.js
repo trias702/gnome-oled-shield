@@ -15,12 +15,11 @@ export const SettingsBindFlags = {
 
 // Define setting ranges
 const SETTING_RANGES = {
-    'display-brightness': { min: 10, max: 100 },
-    'display-contrast': { min: 50, max: 150 },
     'dimming-level': { min: 0, max: 50 },
     'screen-dim-timeout': { min: 30, max: 3600 },
     'unfocus-dim-level': { min: 0, max: 40 },
     'pixel-shift-interval': { min: 60, max: 3600 },
+    'pixel-shift-amount': { min: 1, max: 10 },
     'pixel-refresh-interval': { min: 60, max: 1440 },
     'pixel-refresh-speed': { min: 1, max: 5 }
 };

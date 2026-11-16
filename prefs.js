@@ -52,6 +52,7 @@ export default class OledCarePreferences extends ExtensionPreferences {
             'true-black-background',
             'autohide-top-panel',
             'autohide-dash',
+            'show-indicator',
             'pixel-refresh-enabled',
             'pixel-refresh-smart',
             'pixel-refresh-running'
@@ -60,10 +61,9 @@ export default class OledCarePreferences extends ExtensionPreferences {
         this.INTEGER_KEYS = [
             'dimming-level', 
             'screen-dim-timeout',
-            'display-brightness',
-            'display-contrast',
             'unfocus-dim-level',
             'pixel-shift-interval',
+            'pixel-shift-amount',
             'pixel-refresh-interval',
             'pixel-refresh-speed',
             'pixel-refresh-progress',
@@ -168,7 +168,6 @@ export default class OledCarePreferences extends ExtensionPreferences {
     async #loadAllComponents(page) {
         // Create an array of component building promises
         const componentPromises = [
-            this.#buildDisplaySettings(page),
             this.#buildDimmingSettings(page),
             this.#buildWindowDimmingSettings(page),
             this.#buildPixelShiftSettings(page),
@@ -243,58 +242,6 @@ export default class OledCarePreferences extends ExtensionPreferences {
     }
     
     /**
-     * Create a preferences group for display settings
-     * @param {Adw.PreferencesPage} page - The page to add the group to
-     * @private
-     */
-    #buildDisplaySettings(page) {
-        try {
-            // Display settings group
-            const displayGroup = new Adw.PreferencesGroup({
-                title: 'Display Settings',
-                description: 'Configure basic display properties'
-            });
-            page.add(displayGroup);
-
-            // Screen dim enable switch
-            const screenDimRow = this.#createSwitchRow({
-                title: 'Enable Screen Dimming',
-                subtitle: 'Automatically dim the screen when idle',
-                settingsKey: 'screen-dim-enabled'
-            });
-            displayGroup.add(screenDimRow);
-
-            // Display brightness
-            const brightnessRow = this.#createSpinButtonRow({
-                title: 'Display Brightness',
-                subtitle: 'Brightness level for OLED displays (10-100%)',
-                settingsKey: 'display-brightness',
-                min: 10,
-                max: 100,
-                step: 1,
-                pageStep: 10
-            });
-            displayGroup.add(brightnessRow);
-
-            // Display contrast
-            const contrastRow = this.#createSpinButtonRow({
-                title: 'Display Contrast',
-                subtitle: 'Contrast level for OLED displays (50-150%)',
-                settingsKey: 'display-contrast',
-                min: 50,
-                max: 150,
-                step: 1,
-                pageStep: 10
-            });
-            displayGroup.add(contrastRow);
-            
-        } catch (error) {
-            _logError(error, 'buildDisplaySettings', this.#settings);
-            throw error; // Rethrow for Promise.allSettled to catch
-        }
-    }
-    
-    /**
      * Create a preferences group for dimming settings
      * @param {Adw.PreferencesPage} page - The page to add the group to
      * @private
@@ -303,10 +250,18 @@ export default class OledCarePreferences extends ExtensionPreferences {
         try {
             // Dimming settings group
             const dimmingGroup = new Adw.PreferencesGroup({
-                title: 'Dimming Settings',
-                description: 'Configure screen dimming behavior'
+                title: 'Screen Dimming',
+                description: 'Dim the whole screen after a period of inactivity'
             });
             page.add(dimmingGroup);
+
+            // Screen dim enable switch
+            const screenDimRow = this.#createSwitchRow({
+                title: 'Enable Screen Dimming',
+                subtitle: 'Automatically dim the screen when idle',
+                settingsKey: 'screen-dim-enabled'
+            });
+            dimmingGroup.add(screenDimRow);
 
             // Dimming level
             const dimmingRow = this.#createSpinButtonRow({
@@ -388,14 +343,14 @@ export default class OledCarePreferences extends ExtensionPreferences {
             // Pixel shift settings group
             const pixelShiftGroup = new Adw.PreferencesGroup({
                 title: 'Pixel Shift Settings',
-                description: 'Configure pixel shifting behavior'
+                description: 'Slowly move the whole screen around its normal position, 1 pixel at a time, so static edges wear a wider band instead of one line'
             });
             page.add(pixelShiftGroup);
 
             // Pixel shift enable switch
             const pixelShiftRow = this.#createSwitchRow({
                 title: 'Enable Pixel Shift',
-                subtitle: 'Periodically shift pixels to prevent burn-in',
+                subtitle: 'Periodically move the screen to spread wear from static elements',
                 settingsKey: 'pixel-shift-enabled'
             });
             pixelShiftGroup.add(pixelShiftRow);
@@ -403,7 +358,7 @@ export default class OledCarePreferences extends ExtensionPreferences {
             // Pixel shift interval
             const shiftIntervalRow = this.#createSpinButtonRow({
                 title: 'Pixel Shift Interval',
-                subtitle: 'Time in seconds between shifts (60-3600)',
+                subtitle: 'Seconds between each 1 pixel step (60-3600)',
                 settingsKey: 'pixel-shift-interval',
                 min: 60,
                 max: 3600,
@@ -411,6 +366,18 @@ export default class OledCarePreferences extends ExtensionPreferences {
                 pageStep: 300
             });
             pixelShiftGroup.add(shiftIntervalRow);
+
+            // Pixel shift range
+            const shiftAmountRow = this.#createSpinButtonRow({
+                title: 'Maximum Shift',
+                subtitle: 'How far the screen may move in any direction, in pixels (1-10). Larger spreads wear more, but shows a thin black strip at one screen edge',
+                settingsKey: 'pixel-shift-amount',
+                min: 1,
+                max: 10,
+                step: 1,
+                pageStep: 2
+            });
+            pixelShiftGroup.add(shiftAmountRow);
             
         } catch (error) {
             _logError(error, 'buildPixelShiftSettings', this.#settings);
@@ -432,6 +399,14 @@ export default class OledCarePreferences extends ExtensionPreferences {
             });
             page.add(interfaceGroup);
 
+            // Panel icon switch
+            const indicatorRow = this.#createSwitchRow({
+                title: 'Show Icon in Panel',
+                subtitle: 'Show the OLED Care menu in the panel. When hidden, protection keeps running; open these settings from the Extensions app',
+                settingsKey: 'show-indicator'
+            });
+            interfaceGroup.add(indicatorRow);
+
             // True black background switch
             const blackBgRow = this.#createSwitchRow({
                 title: 'True Black Background',
@@ -443,7 +418,7 @@ export default class OledCarePreferences extends ExtensionPreferences {
             // Panel auto-hide switch
             const panelHideRow = this.#createSwitchRow({
                 title: 'Auto-hide Top Panel',
-                subtitle: 'Hide the top panel when not in use',
+                subtitle: 'Hide the top bar until the pointer reaches its screen edge. With Dash to Panel, hides its panel instead',
                 settingsKey: 'autohide-top-panel'
             });
             interfaceGroup.add(panelHideRow);
@@ -451,7 +426,7 @@ export default class OledCarePreferences extends ExtensionPreferences {
             // Dash auto-hide switch
             const dashHideRow = this.#createSwitchRow({
                 title: 'Auto-hide Dash',
-                subtitle: 'Hide the dash/dock when not in use',
+                subtitle: 'Hide the overview dash, and make Ubuntu Dock / Dash to Dock auto-hide',
                 settingsKey: 'autohide-dash'
             });
             interfaceGroup.add(dashHideRow);

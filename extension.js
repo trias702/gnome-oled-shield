@@ -20,6 +20,7 @@ const Main = isTestEnv
 import { Extension as BaseExtension } from 'resource:///org/gnome/shell/extensions/extension.js';
 // PressureBarrier lives in the shell's JS layout module (there is no Shell.PressureBarrier)
 import { PressureBarrier } from 'resource:///org/gnome/shell/ui/layout.js';
+import { ExtensionState } from 'resource:///org/gnome/shell/misc/extensionUtils.js';
 
 // Import compatibility layer first to register polyfills (AbortController, etc.)
 import { removeSource } from './lib/compatibility.js';
@@ -45,6 +46,17 @@ import {
     DisplayError,
     errorRegistry
 } from './lib/errors.js';
+
+
+// Other extensions that replace the shell's own panel or dash. Auto-hide
+// cooperates with them instead of fighting over the same actors.
+const DASH_TO_PANEL_UUID = 'dash-to-panel@jderose9.github.com';
+const DASH_TO_PANEL_SCHEMA = 'org.gnome.shell.extensions.dash-to-panel';
+const DOCK_UUIDS = ['ubuntu-dock@ubuntu.com', 'dash-to-dock@micxgx.gmail.com'];
+const DOCK_SCHEMA = 'org.gnome.shell.extensions.dash-to-dock';
+// Original values of other extensions' settings that auto-hide changed,
+// persisted so they can be restored even after a crash or logout.
+const AUTOHIDE_BACKUP_KEY = 'autohide-saved-settings';
 
 /**
  * Main extension class for OLED Care
@@ -121,7 +133,12 @@ export default class OledCareExtension extends BaseExtension {
     #resourceBundle;
     #bgSettings;
     #panelHidden;
+    #panelStrutsRemoved;
+    #dtpAutohide;
     #dashHidden;
+    #overviewDashHiddenByUs;
+    #extensionStateId;
+    #extensionSwitchId;
     #savedPanelHeight;
     #panelBarrier;
     #panelPressure;
@@ -131,7 +148,6 @@ export default class OledCareExtension extends BaseExtension {
     #focusWindowId;
     #windowCreatedId;
     #panelSignalIds;
-    #dockBackup;
     #enableGeneration;
 
     /**
@@ -162,7 +178,12 @@ export default class OledCareExtension extends BaseExtension {
         this.#resourceBundle = null;
         this.#bgSettings = null;
         this.#panelHidden = false;
+        this.#panelStrutsRemoved = false;
+        this.#dtpAutohide = false;
         this.#dashHidden = false;
+        this.#overviewDashHiddenByUs = false;
+        this.#extensionStateId = null;
+        this.#extensionSwitchId = null;
         this.#savedPanelHeight = -1;
         this.#panelBarrier = null;
         this.#panelPressure = null;
@@ -172,7 +193,6 @@ export default class OledCareExtension extends BaseExtension {
         this.#focusWindowId = null;
         this.#windowCreatedId = null;
         this.#panelSignalIds = [];
-        this.#dockBackup = null;
         this.#enableGeneration = 0;
     }
     
@@ -576,8 +596,10 @@ export default class OledCareExtension extends BaseExtension {
             // Set initial status
             this.#indicator.updateStatus(this.#status);
             
-            // Add the indicator to the panel
+            // Add the indicator to the panel. addToStatusArea() always shows
+            // it, so apply the user's choice afterwards.
             Main.panel.addToStatusArea(OledCareExtension.EXTENSION_ID, this.#indicator);
+            this.#applyIndicatorVisibility();
             
             // Note: Indicator extends PanelMenu.Button (not EventEmitter),
             // so event-based communication is handled via GSettings signals instead.
@@ -642,6 +664,12 @@ export default class OledCareExtension extends BaseExtension {
                 metrics.stopFrameWatching();
             }
 
+            return;
+        }
+
+        // Handle panel icon visibility
+        if (key === 'show-indicator') {
+            this.#applyIndicatorVisibility();
             return;
         }
 
@@ -775,6 +803,10 @@ export default class OledCareExtension extends BaseExtension {
             this.#disableUnfocusDim();
         }
 
+        // Put back other extensions' settings left changed by a previous
+        // session that ended without turning auto-hide off (crash, logout)
+        this.#restoreStaleAutohideBackups();
+
         // Apply autohide settings
         if (this.#settings.get_boolean('autohide-top-panel')) {
             this.#hideTopPanel();
@@ -789,6 +821,21 @@ export default class OledCareExtension extends BaseExtension {
         }
 
         this.#log('Applied all settings');
+    }
+
+    /**
+     * Show or hide the panel icon. Only its panel container is hidden: the
+     * indicator also owns the feature components, which must keep running.
+     * @private
+     */
+    #applyIndicatorVisibility() {
+        const container = this.#indicator?.container;
+        if (!container || !this.#settings) return;
+        const show = this.#settings.get_boolean('show-indicator');
+        if (!show)
+            this.#indicator.menu?.close?.();
+        container.visible = show;
+        this.#log(`Panel icon ${show ? 'shown' : 'hidden'}`);
     }
 
     /**
@@ -862,7 +909,17 @@ export default class OledCareExtension extends BaseExtension {
      * @private
      */
     #hideTopPanel() {
-        if (this.#panelHidden) return;
+        if (this.#panelHidden || this.#dtpAutohide) return;
+        this.#watchOtherExtensions();
+
+        // Dash to Panel moves the shell's panel (often to the bottom) and has
+        // its own edge-aware auto-hide ("intellihide"). Use that instead of
+        // collapsing the panel box, which Dash to Panel now owns.
+        if (this.#isExtensionActive(DASH_TO_PANEL_UUID)) {
+            this.#enableDashToPanelAutohide();
+            return;
+        }
+
         try {
             const panel = Main.panel;
             if (!panel) return;
@@ -873,6 +930,12 @@ export default class OledCareExtension extends BaseExtension {
             }
 
             this.#panelHidden = true;
+
+            // While auto-hidden, the panel overlays windows instead of
+            // reserving space; otherwise every reveal and re-hide would
+            // change the work area, resizing maximized windows and
+            // rearranging desktop icons each time.
+            this.#setPanelReservesSpace(false);
 
             // Set up a pressure barrier at the top edge so mouse hover reveals the panel
             this.#setupPanelBarrier();
@@ -908,8 +971,24 @@ export default class OledCareExtension extends BaseExtension {
      * Disable auto-hide, permanently show the top panel
      * @private
      */
-    #showTopPanel() {
-        if (!this.#panelHidden) return;
+    #showTopPanel({keepExternal = false} = {}) {
+        if (this.#dtpAutohide) {
+            this.#dtpAutohide = false;
+            if (!keepExternal)
+                this.#restoreBackup('dashToPanel', DASH_TO_PANEL_SCHEMA);
+            this.#log('Dash to Panel auto-hide released');
+        }
+        if (this.#panelHidden)
+            this.#releaseNativePanelAutohide();
+        if (!keepExternal)
+            this.#unwatchOtherExtensionsIfIdle();
+    }
+
+    /**
+     * Undo the shell-panel auto-hide (barrier, slide, collapsed panel box)
+     * @private
+     */
+    #releaseNativePanelAutohide() {
         try {
             this.#cancelPanelHideTimeout();
             this.#cancelPanelShowTimeout();
@@ -923,14 +1002,47 @@ export default class OledCareExtension extends BaseExtension {
                 panel.reactive = true;
             }
 
-            // Restore the panel box to its natural height so struts are correct again
+            // Restore the panel box to its natural height and let it reserve
+            // its space again
             Main.layoutManager.panelBox.set_height(-1);
+            this.#setPanelReservesSpace(true);
             this.#savedPanelHeight = -1;
 
             this.#panelHidden = false;
             this.#log('Top panel shown');
         } catch (error) {
             this.#logError('Failed to show top panel', error);
+        }
+    }
+
+    /**
+     * Set whether the shell's panel box reserves screen space (a strut), by
+     * changing the layout manager's tracking entry for it. Only undoes a
+     * change made here, and leaves the entry alone if the panel box is no
+     * longer tracked with it (e.g. Dash to Panel has taken it over).
+     * @param {boolean} reserve - whether the panel should reserve space
+     * @private
+     */
+    #setPanelReservesSpace(reserve) {
+        try {
+            const layout = Main.layoutManager;
+            const index = layout._findActor?.(layout.panelBox) ?? -1;
+            const data = index >= 0 ? layout._trackedActors[index] : null;
+            if (!reserve) {
+                if (data?.affectsStruts) {
+                    data.affectsStruts = false;
+                    this.#panelStrutsRemoved = true;
+                    layout._queueUpdateRegions();
+                }
+            } else if (this.#panelStrutsRemoved) {
+                if (data && !data.affectsStruts) {
+                    data.affectsStruts = true;
+                    layout._queueUpdateRegions();
+                }
+                this.#panelStrutsRemoved = false;
+            }
+        } catch (error) {
+            this.#logError('Failed to change panel space reservation', error);
         }
     }
 
@@ -1092,28 +1204,18 @@ export default class OledCareExtension extends BaseExtension {
     #hideDash() {
         if (this.#dashHidden) return;
         try {
-            // Hide the overview dash
-            const dash = Main.overview?.dash;
-            if (dash) {
-                dash.hide();
-            }
-
-            // Also handle Ubuntu Dock / Dash to Dock if present. Remember the
-            // user's own values so they are restored (not reset) afterwards.
-            const dockSettings = this.#getDockSettings();
-            if (dockSettings) {
-                this.#dockBackup ??= {
-                    'dock-fixed': dockSettings.get_value('dock-fixed'),
-                    'autohide': dockSettings.get_value('autohide'),
-                    'intellihide-mode': dockSettings.get_value('intellihide-mode'),
-                };
-                dockSettings.set_boolean('dock-fixed', false);
-                dockSettings.set_boolean('autohide', true);
-                // intellihide-mode is an enum key; ALL_WINDOWS is the most aggressive hide
-                dockSettings.set_string('intellihide-mode', 'ALL_WINDOWS');
-            }
-
             this.#dashHidden = true;
+            this.#watchOtherExtensions();
+
+            // Hide the overview dash, unless something else (Dash to Panel,
+            // Ubuntu Dock) already hid it; then it is not ours to show again.
+            const dash = Main.overview?.dash;
+            if (dash?.visible) {
+                dash.hide();
+                this.#overviewDashHiddenByUs = true;
+            }
+
+            this.#applyDockAutohide();
             this.#log('Dash hidden');
         } catch (error) {
             this.#logError('Failed to hide dash', error);
@@ -1121,26 +1223,50 @@ export default class OledCareExtension extends BaseExtension {
     }
 
     /**
+     * Make Ubuntu Dock / Dash to Dock auto-hide, if one is running. Their
+     * settings are only touched while the dock is actually enabled.
+     * @private
+     */
+    #applyDockAutohide() {
+        if (!this.#dashHidden || !DOCK_UUIDS.some(uuid => this.#isExtensionActive(uuid)))
+            return;
+        const dock = this.#lookupSettings(DOCK_SCHEMA);
+        if (!dock) return;
+
+        const backup = this.#loadAutohideBackups();
+        backup.dock ??= {
+            'dock-fixed': dock.get_boolean('dock-fixed'),
+            'autohide': dock.get_boolean('autohide'),
+            'intellihide-mode': dock.get_string('intellihide-mode'),
+        };
+        this.#saveAutohideBackups(backup);
+
+        dock.set_boolean('dock-fixed', false);
+        dock.set_boolean('autohide', true);
+        // intellihide-mode is an enum key; ALL_WINDOWS is the most aggressive hide
+        dock.set_string('intellihide-mode', 'ALL_WINDOWS');
+        this.#log('Dock auto-hide applied');
+    }
+
+    /**
      * Show the dash/dock
      * @private
      */
     #showDash() {
-        if (!this.#dashHidden) return;
+        if (!this.#dashHidden) {
+            this.#unwatchOtherExtensionsIfIdle();
+            return;
+        }
         try {
-            const dash = Main.overview?.dash;
-            if (dash) {
-                dash.show();
-            }
+            if (this.#overviewDashHiddenByUs)
+                Main.overview?.dash?.show();
+            this.#overviewDashHiddenByUs = false;
 
             // Restore the user's previous Ubuntu Dock / Dash to Dock values
-            const dockSettings = this.#getDockSettings();
-            if (dockSettings && this.#dockBackup) {
-                for (const [key, value] of Object.entries(this.#dockBackup))
-                    dockSettings.set_value(key, value);
-            }
-            this.#dockBackup = null;
+            this.#restoreBackup('dock', DOCK_SCHEMA);
 
             this.#dashHidden = false;
+            this.#unwatchOtherExtensionsIfIdle();
             this.#log('Dash shown');
         } catch (error) {
             this.#logError('Failed to show dash', error);
@@ -1148,20 +1274,156 @@ export default class OledCareExtension extends BaseExtension {
     }
 
     /**
-     * Get GSettings for Ubuntu Dock / Dash to Dock if available
+     * Switch Dash to Panel to always auto-hide, remembering the user's value
+     * @private
+     */
+    #enableDashToPanelAutohide() {
+        const dtp = this.#lookupSettings(DASH_TO_PANEL_SCHEMA, DASH_TO_PANEL_UUID);
+        if (!dtp) {
+            this.#log('Dash to Panel settings not found; panel auto-hide unavailable');
+            return;
+        }
+        const backup = this.#loadAutohideBackups();
+        backup.dashToPanel ??= {
+            'intellihide': dtp.get_boolean('intellihide'),
+            'intellihide-hide-from-windows': dtp.get_boolean('intellihide-hide-from-windows'),
+            'intellihide-hide-from-monitor-windows': dtp.get_boolean('intellihide-hide-from-monitor-windows'),
+            'intellihide-only-secondary': dtp.get_boolean('intellihide-only-secondary'),
+        };
+        this.#saveAutohideBackups(backup);
+
+        // Hide whenever the pointer is not on the panel, not only when a
+        // window overlaps it (the point is to keep it off the screen), and
+        // on every monitor including the primary one.
+        dtp.set_boolean('intellihide-hide-from-windows', false);
+        dtp.set_boolean('intellihide-hide-from-monitor-windows', false);
+        dtp.set_boolean('intellihide-only-secondary', false);
+        dtp.set_boolean('intellihide', true);
+        this.#dtpAutohide = true;
+        this.#log('Top panel auto-hide delegated to Dash to Panel');
+    }
+
+    /**
+     * @param {string} uuid - extension UUID
+     * @returns {boolean} whether that extension is enabled and running
+     * @private
+     */
+    #isExtensionActive(uuid) {
+        return Main.extensionManager.lookup(uuid)?.state === ExtensionState.ACTIVE;
+    }
+
+    /**
+     * Get another extension's GSettings, from the system schemas or from
+     * that extension's own schemas directory
+     * @param {string} schemaId - schema id
+     * @param {string} [uuid] - extension that may ship the schema
      * @returns {Gio.Settings|null}
      * @private
      */
-    #getDockSettings() {
+    #lookupSettings(schemaId, uuid = null) {
         try {
-            const schemaId = 'org.gnome.shell.extensions.dash-to-dock';
-            const schema = Gio.SettingsSchemaSource.get_default()?.lookup(schemaId, true);
+            let schema = Gio.SettingsSchemaSource.get_default()?.lookup(schemaId, true);
+            const dir = uuid ? Main.extensionManager.lookup(uuid)?.dir?.get_child('schemas') : null;
+            if (!schema && dir?.query_exists(null)) {
+                const source = Gio.SettingsSchemaSource.new_from_directory(
+                    dir.get_path(), Gio.SettingsSchemaSource.get_default(), false);
+                schema = source.lookup(schemaId, false);
+            }
             if (schema)
-                return new Gio.Settings({ settings_schema: schema });
-        } catch {
-            // No dock extension installed
+                return new Gio.Settings({settings_schema: schema});
+        } catch (error) {
+            this.#log(`Settings ${schemaId} unavailable: ${error.message}`);
         }
         return null;
+    }
+
+    #loadAutohideBackups() {
+        try {
+            return JSON.parse(this.#settings?.get_string(AUTOHIDE_BACKUP_KEY) || '{}');
+        } catch {
+            return {};
+        }
+    }
+
+    #saveAutohideBackups(backup) {
+        this.#settings?.set_string(AUTOHIDE_BACKUP_KEY,
+            Object.keys(backup).length ? JSON.stringify(backup) : '');
+    }
+
+    /**
+     * Write back the saved original values of another extension's settings
+     * @param {string} name - backup entry ('dock' or 'dashToPanel')
+     * @param {string} schemaId - schema the values belong to
+     * @private
+     */
+    #restoreBackup(name, schemaId) {
+        const backup = this.#loadAutohideBackups();
+        if (!backup[name]) return;
+        const uuid = name === 'dashToPanel' ? DASH_TO_PANEL_UUID : null;
+        const settings = this.#lookupSettings(schemaId, uuid);
+        if (settings) {
+            for (const [key, value] of Object.entries(backup[name])) {
+                if (typeof value === 'boolean')
+                    settings.set_boolean(key, value);
+                else
+                    settings.set_string(key, value);
+            }
+            this.#log(`Restored ${name} settings`);
+        }
+        delete backup[name];
+        this.#saveAutohideBackups(backup);
+    }
+
+    #restoreStaleAutohideBackups() {
+        if (!this.#settings.get_boolean('autohide-top-panel'))
+            this.#restoreBackup('dashToPanel', DASH_TO_PANEL_SCHEMA);
+        if (!this.#settings.get_boolean('autohide-dash'))
+            this.#restoreBackup('dock', DOCK_SCHEMA);
+    }
+
+    /**
+     * Follow Dash to Panel / dock extensions being enabled or disabled while
+     * auto-hide is on (they are also disabled on the lock screen), so the
+     * right auto-hide method is always in use.
+     * @private
+     */
+    #watchOtherExtensions() {
+        if (this.#extensionStateId !== null) return;
+        this.#extensionStateId = Main.extensionManager.connect('extension-state-changed', (_mgr, ext) => {
+            if (ext.uuid !== DASH_TO_PANEL_UUID && !DOCK_UUIDS.includes(ext.uuid))
+                return;
+            // The shell announces DEACTIVATING/ACTIVATING before it runs the
+            // other extension's disable()/enable(); act once that is done.
+            if (ext.state === ExtensionState.DEACTIVATING || ext.state === ExtensionState.ACTIVATING)
+                return;
+            removeSource(this.#extensionSwitchId);
+            this.#extensionSwitchId = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+                this.#extensionSwitchId = null;
+                this.#onOtherExtensionChanged();
+                return GLib.SOURCE_REMOVE;
+            });
+        });
+    }
+
+    #onOtherExtensionChanged() {
+        if (!this.#settings) return;
+        const wantDtp = this.#isExtensionActive(DASH_TO_PANEL_UUID);
+        if ((this.#panelHidden && wantDtp) || (this.#dtpAutohide && !wantDtp)) {
+            // Keep Dash to Panel's setting while switching methods; it is
+            // restored when auto-hide is turned off
+            this.#showTopPanel({keepExternal: true});
+            this.#hideTopPanel();
+        }
+        this.#applyDockAutohide();
+    }
+
+    #unwatchOtherExtensionsIfIdle() {
+        if (this.#extensionStateId === null || this.#panelHidden || this.#dtpAutohide || this.#dashHidden)
+            return;
+        Main.extensionManager.disconnect(this.#extensionStateId);
+        this.#extensionStateId = null;
+        removeSource(this.#extensionSwitchId);
+        this.#extensionSwitchId = null;
     }
 
     /**

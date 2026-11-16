@@ -73,6 +73,14 @@ make test-headless   # ~2 min, exits non-zero on any failure or shell warning
 make probe-apis      # checks every GNOME Shell/mutter API the code relies on
 ```
 
+To check compatibility with a panel or dock extension installed on your machine,
+run the same tests with it enabled alongside:
+
+```bash
+tests/headless/run-headless-tests.sh --with dash-to-panel@jderose9.github.com
+tests/headless/run-headless-tests.sh --with ubuntu-dock@ubuntu.com
+```
+
 For manual poking, a nested shell window also works (needs the mutter devkit package):
 
 ```bash

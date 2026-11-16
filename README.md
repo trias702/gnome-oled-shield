@@ -4,10 +4,26 @@ An advanced GNOME extension to protect OLED displays from burn-in using various 
 
 ## Features
 
-- **Pixel Shift**: Subtly shifts the entire screen content to prevent static elements from causing burn-in
+- **Pixel Shift**: Slowly moves the whole screen around its normal position so static edges wear a
+  band instead of a single line. It walks a square spiral out to a configurable distance (default
+  4 px) and back, 1 px per step (default every 2 minutes), giving every offset equal time and
+  resuming where it left off after a restart
 - **Pixel Refresh**: Performs full-screen rejuvenation routines to equalize pixel wear
-- **Screen Dimming**: Reduces brightness for static elements like panels and system trays
-- **Display Management**: Intelligently manages multiple displays, applying protection only to OLED screens
+- **Screen Dimming**: Dims the whole screen after a period of inactivity
+- **Unfocused Window Dimming**: Dims every window except the one you are using
+- **True Black Background**: Replaces the wallpaper with solid black (the original is restored when turned off)
+- **Auto-hide Top Panel**: Hides the top bar until the pointer is pushed against the top screen edge.
+  With [Dash to Panel](https://extensions.gnome.org/extension/1160/dash-to-panel/) it switches on
+  Dash to Panel's own auto-hide ("intellihide") instead, so the panel hides and reveals at whichever
+  edge it is on
+- **Auto-hide Dash**: Hides the overview dash and makes Ubuntu Dock / Dash to Dock auto-hide (at any
+  dock position)
+
+The panel icon gives quick access to the main switches; it can be hidden in Preferences
+("Show Icon in Panel") without stopping any protection.
+
+Settings that auto-hide changes in Dash to Panel or Ubuntu Dock / Dash to Dock are saved first and put
+back when the option is turned off.
 
 ## Modernization
 

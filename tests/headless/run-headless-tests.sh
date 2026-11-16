@@ -17,8 +17,16 @@
 # failed or if the shell logged any JS ERROR / CRITICAL / JS WARNING.
 #
 # Usage: tests/headless/run-headless-tests.sh [--keep] [--timeout SECONDS]
+#                                              [--with UUID]... [--driver DIR]
 #   --keep       keep the isolated environment directory after the run
 #   --timeout    overall timeout for the in-shell test run (default 300)
+#   --with UUID  also enable another installed extension (e.g. Dash to Panel
+#                or Ubuntu Dock) to test compatibility with it. Repeatable.
+#                User-installed extensions are copied into the isolated
+#                environment; system ones are used in place. Your settings
+#                for them are not copied: they start from their defaults.
+#   --driver DIR use a different test driver extension directory (its
+#                metadata uuid is enabled instead of oled-care-test@local)
 #
 # Requirements: gnome-shell (with --headless support), gjs, Gtk 4 typelib
 # (for the test windows), glib-compile-schemas, dbus-run-session, make, jq.
@@ -33,12 +41,16 @@ UUID="oled-care@asplund.kim"
 TEST_UUID="oled-care-test@local"
 KEEP=false
 TIMEOUT=300
+WITH=()
+DRIVER_DIR=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --keep) KEEP=true ;;
         --timeout) shift; TIMEOUT="$1" ;;
-        -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
+        --with) shift; WITH+=("$1") ;;
+        --driver) shift; DRIVER_DIR="$(cd "$1" && pwd)" ;;
+        -h|--help) sed -n '2,38p' "$0"; exit 0 ;;
         *) echo "Unknown option: $1" >&2; exit 2 ;;
     esac
     shift
@@ -70,12 +82,29 @@ mkdir -p "$WORK_DIR"/{data,config,cache}
 EXT_ROOT="$WORK_DIR/data/gnome-shell/extensions"
 mkdir -p "$EXT_ROOT"
 cp -r "$REPO_DIR/build" "$EXT_ROOT/$UUID"
-cp -r "$SCRIPT_DIR/$TEST_UUID" "$EXT_ROOT/$TEST_UUID"
+DRIVER_DIR="${DRIVER_DIR:-$SCRIPT_DIR/$TEST_UUID}"
+TEST_UUID="$(jq -r .uuid "$DRIVER_DIR/metadata.json")"
+cp -r "$DRIVER_DIR" "$EXT_ROOT/$TEST_UUID"
 
 # Keep the test driver's shell-version in step with the extension's
 jq --argjson v "$(jq -c '."shell-version"' "$REPO_DIR/metadata.json")" \
-    '."shell-version" = $v' "$SCRIPT_DIR/$TEST_UUID/metadata.json" \
+    '."shell-version" = $v' "$DRIVER_DIR/metadata.json" \
     > "$EXT_ROOT/$TEST_UUID/metadata.json"
+
+# Extra extensions to test alongside. They are enabled before OLED Care, the
+# same order the shell uses when they were installed first.
+WITH_JSON=""
+for w in "${WITH[@]}"; do
+    if [ -d "$HOME/.local/share/gnome-shell/extensions/$w" ]; then
+        cp -r "$HOME/.local/share/gnome-shell/extensions/$w" "$EXT_ROOT/$w"
+    elif [ ! -d "/usr/share/gnome-shell/extensions/$w" ]; then
+        echo "Extension not installed: $w" >&2
+        exit 2
+    fi
+    WITH_JSON+="\"$w\", "
+    echo "== Also enabling $w"
+done
+export WITH_JSON
 
 SHELL_LOG="$WORK_DIR/gnome-shell.log"
 SESSION_LOG="$WORK_DIR/session.log"
@@ -89,7 +118,7 @@ unset DISPLAY WAYLAND_DISPLAY
 
 echo "== Starting isolated headless GNOME Shell ($(gnome-shell --version))"
 dbus-run-session -- bash -c '
-    gsettings set org.gnome.shell enabled-extensions "[\"$UUID\", \"$TEST_UUID\"]"
+    gsettings set org.gnome.shell enabled-extensions "[$WITH_JSON\"$UUID\", \"$TEST_UUID\"]"
     gsettings set org.gnome.shell welcome-dialog-last-shown-version "999"
     # A non-default dock value lets the test verify it is restored afterwards
     gsettings set org.gnome.shell.extensions.dash-to-dock dock-fixed true 2>/dev/null
@@ -133,8 +162,27 @@ fi
 
 echo
 echo "== Shell errors and warnings"
-# The NM.Object::client line is a harmless GJS warning from the shell itself
+# The NM.Object::client line is a harmless GJS warning from the shell itself.
+# Warnings raised by --with extensions' own code (their GJS class names
+# contain the UUID with @ and . turned into _) are theirs, not ours: Ubuntu
+# Dock, for one, logs hundreds of St-CRITICALs in a headless shell on its own.
 PROBLEMS=$(grep -E "JS ERROR|JS WARNING|CRITICAL" "$SHELL_LOG" | grep -v "NM.Object::client")
+if [ -n "$PROBLEMS" ] && [ ${#WITH[@]} -gt 0 ]; then
+    OTHERS=()
+    for w in "${WITH[@]}"; do OTHERS+=(-e "$w" -e "${w//[@.]/_}"); done
+    # Their widgets do not all carry the UUID (plain StBin, StScrollBar...),
+    # so a "not in the stage" warning logged in the same second as one that
+    # does is treated as part of the same burst.
+    SECONDS_RE=$(echo "$PROBLEMS" | grep -F "${OTHERS[@]}" \
+        | grep -oE '[0-9]{2}:[0-9]{2}:[0-9]{2}\.' | sort -u | paste -sd'|')
+    BEFORE=$(echo "$PROBLEMS" | wc -l)
+    PROBLEMS=$(echo "$PROBLEMS" | grep -vF "${OTHERS[@]}")
+    if [ -n "$SECONDS_RE" ] && [ -n "$PROBLEMS" ]; then
+        PROBLEMS=$(echo "$PROBLEMS" | grep -vE "(${SECONDS_RE}).*which is not in the stage")
+    fi
+    IGNORED=$(( BEFORE - $(echo -n "$PROBLEMS" | grep -c '') ))
+    [ "$IGNORED" -gt 0 ] && echo "($IGNORED lines from the --with extensions themselves ignored)"
+fi
 if [ -n "$PROBLEMS" ]; then
     echo "$PROBLEMS" | cut -c1-300
     STATUS=1

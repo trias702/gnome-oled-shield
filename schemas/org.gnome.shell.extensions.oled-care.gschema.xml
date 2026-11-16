@@ -11,18 +11,6 @@
             <summary>Enable Screen Dimming</summary>
             <description>Enable automatic screen dimming when idle</description>
         </key>
-        <key name="display-brightness" type="i">
-            <default>100</default>
-            <range min="10" max="100"/>
-            <summary>Display Brightness</summary>
-            <description>Brightness level for OLED displays (10-100)</description>
-        </key>
-        <key name="display-contrast" type="i">
-            <default>100</default>
-            <range min="50" max="150"/>
-            <summary>Display Contrast</summary>
-            <description>Contrast level for OLED displays (50-150)</description>
-        </key>
         <key name="dimming-level" type="i">
             <default>20</default>
             <range min="0" max="50"/>
@@ -40,10 +28,22 @@
             <description>Periodically shift pixels to prevent burn-in</description>
         </key>
         <key name="pixel-shift-interval" type="i">
-            <default>300</default>
+            <default>120</default>
             <range min="60" max="3600"/>
             <summary>Pixel Shift Interval</summary>
-            <description>Interval in seconds between pixel shifts</description>
+            <description>Seconds between 1 px steps of the pixel shift walk</description>
+        </key>
+        <key name="pixel-shift-amount" type="i">
+            <default>4</default>
+            <range min="1" max="10"/>
+            <summary>Maximum Pixel Shift</summary>
+            <description>How far, in pixels, the screen may move from its normal position in any direction</description>
+        </key>
+        <key name="pixel-shift-step" type="i">
+            <default>0</default>
+            <range min="0" max="1000"/>
+            <summary>Pixel Shift Position</summary>
+            <description>Internal: current step of the pixel shift walk, so it resumes where it left off</description>
         </key>
         <key name="screen-dim-timeout" type="i">
             <default>180</default>
@@ -71,6 +71,11 @@
             <default>''</default>
             <summary>Saved Background Settings</summary>
             <description>JSON backup of desktop background settings before true black was applied</description>
+        </key>
+        <key name="autohide-saved-settings" type="s">
+            <default>''</default>
+            <summary>Saved Panel/Dock Settings</summary>
+            <description>JSON backup of Dash to Panel / Ubuntu Dock settings changed by auto-hide, restored when auto-hide is turned off</description>
         </key>
         <key name="autohide-top-panel" type="b">
             <default>false</default>
@@ -140,6 +145,11 @@
             <range min="0" max="3600"/>
             <summary>Pixel Refresh Time Remaining</summary>
             <description>Estimated time remaining for current pixel refresh (in seconds, 0-3600)</description>
+        </key>
+        <key name="show-indicator" type="b">
+            <default>true</default>
+            <summary>Show Panel Icon</summary>
+            <description>Show the OLED Care icon and menu in the panel. The protection features keep running when it is hidden.</description>
         </key>
         <key name="debug-mode" type="b">
             <default>false</default>

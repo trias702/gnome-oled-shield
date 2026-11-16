@@ -21,14 +21,13 @@ describe('ExtensionPreferences', () => {
         // Create mock settings with all expected keys
         settings = new Settings({
             'screen-dim-enabled': false,
-            'display-brightness': 50,
-            'display-contrast': 100,
             'dimming-level': 20,
             'screen-dim-timeout': 300,
             'unfocus-dim-enabled': false,
             'unfocus-dim-level': 30,
             'pixel-shift-enabled': false,
-            'pixel-shift-interval': 300,
+            'pixel-shift-interval': 120,
+            'pixel-shift-amount': 4,
             'true-black-background': false,
             'autohide-top-panel': false,
             'autohide-dash': false,
@@ -81,8 +80,8 @@ describe('ExtensionPreferences', () => {
         assertValueEquals(settings.get_boolean('screen-dim-enabled'), true);
         
         // Test integer setting
-        settings.set_int('display-brightness', 75);
-        assertValueEquals(settings.get_int('display-brightness'), 75);
+        settings.set_int('dimming-level', 35);
+        assertValueEquals(settings.get_int('dimming-level'), 35);
         
         // Test string array setting
         const schedule = ['09:00', '18:00'];
@@ -125,12 +124,6 @@ describe('ExtensionPreferences', () => {
 
     it('should validate setting ranges', () => {
         const filledWindow = prefs.fillPreferencesWindow(window);
-        
-        // Test brightness range
-        settings.set_int('display-brightness', 5); // Below minimum
-        assertValueEquals(settings.get_int('display-brightness'), 10);
-        settings.set_int('display-brightness', 110); // Above maximum
-        assertValueEquals(settings.get_int('display-brightness'), 100);
         
         // Test dimming level range
         settings.set_int('dimming-level', -10); // Below minimum
